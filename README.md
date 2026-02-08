@@ -8,6 +8,7 @@ The library directly accesses the RP2350 power management and timer registers vi
 
 It is designed to control low-power modes, timers, and wake-up alarms on Raspberry Pi Pico 2.
 
+> [Here](https://github.com/PippoZord/tinygo-powman)  for tinygo library
 
 ## Requirements
 
