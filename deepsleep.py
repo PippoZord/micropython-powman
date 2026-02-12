@@ -1,4 +1,4 @@
-from machine import mem32
+from machine import mem32, idle
 from micropython import const
 
 # POWMAN BASE ADDRESS
@@ -38,14 +38,27 @@ BOOT3 = const(0xDC)
 # OFFSET POWER CONFIGURATION
 DBG_PWRCFG = const(0xA4)
 
+# OFFSET GPIO AWAKE
+PWRUP0 = const(0x8C)
 
 
-def powmanInit(absTimeMs):
+# OFFSET PADS
+PADS_BANK0_BASE = 0x40038000
+
+
+# Initialize POWMAN clock and set absolute time in ms
+# absTimeMs must be > 0
+def powmanInit(absTimeMs:int):
+    if absTimeMs < 1 :
+        raise Exception("absTimeMs must be greater than 0")
+
     print("Initializing time", absTimeMs)
 
     # Stop timer
     mem32[POWMAN_BASE + TIMER] = PASS | 0x00
-
+    
+    mem32[POWMAN_BASE + PWRUP0] = PASS | 0x200
+    
     # Set time (64 bit split in 4 x 16 bit)
     mem32[POWMAN_BASE + SET_TIME_15TO0]  = PASS | (absTimeMs & 0xFFFF)
     mem32[POWMAN_BASE + SET_TIME_31TO16] = PASS | ((absTimeMs >> 16) & 0xFFFF)
@@ -60,6 +73,7 @@ def powmanInit(absTimeMs):
     mem32[POWMAN_BASE + DBG_PWRCFG] = PASS | 0x01
 
 
+# Return current POWMAN time (64-bit)
 def _getCurrentTime():
     while True:
         hi1 = mem32[POWMAN_BASE + READ_TIME_UPPER]
@@ -69,12 +83,15 @@ def _getCurrentTime():
         if hi1 == hi2:
             return (hi1 << 32) | lo
 
+# force reboot
 def _forceReboot():
     mem32[POWMAN_BASE + BOOT0] = 0
     mem32[POWMAN_BASE + BOOT1] = 0
     mem32[POWMAN_BASE + BOOT2] = 0
     mem32[POWMAN_BASE + BOOT3] = 0
 
+
+# Force dormant mode and set reboot enable
 def _powmanPowerOff():
     # Set low power mode
     mem32[POWMAN_BASE + VREG_LP_ENTRY] = PASS | 0x0004
@@ -82,15 +99,21 @@ def _powmanPowerOff():
     _forceReboot()
 
     # Switch off system
-    # Bit 3: SWCORE, Bit 2: XIP, Bit 1: SRAM0, Bit 0: SRAM1
+    # Bit 3: SWCORE, Bit 2: XIP, Bit 1: SRAM0, Bit 0: SRAM11\
     mem32[POWMAN_BASE + STATE] = PASS | 0x00F0
 
     # Wait for interrupt / alarm
-    machine.idle()         # = WFI
+    idle() # = WFI
     
 
 
-def PowmanOffForMs(sleepingMs):
+# Start dormant mode.
+# create and set alarm which trigger awake after sleepingMs.
+# sleepingMs must be > 0
+def powmanOffForMs(sleepingMs:int):
+    if sleepingMs < 1 :
+        raise Exception("sleepingMs must be greater than 0")
+
     alarmTime = sleepingMs + _getCurrentTime()
     print("Going to sleep for", sleepingMs, "ms")
     # Enable interrupt
@@ -109,3 +132,28 @@ def PowmanOffForMs(sleepingMs):
     mem32[POWMAN_BASE + TIMER] = PASS | 0x72
 
     _powmanPowerOff()
+    
+
+# Force deep sleep until gpio HIGH
+def powmanOffUntilGPIO(gpio:int):
+    if gpio < 0 or gpio > 50:
+        raise Exception("gpio must be between 0 and 50")
+    
+    # Compute GPIO pad control register address
+    GPIO_PAD_CTRL = PADS_BANK0_BASE + ((gpio+1) * 4)
+    
+    # Set GPIO enable for interupt
+    mem32[GPIO_PAD_CTRL] = 0x44 
+
+    
+    # Set interrupt enable
+    mem32[POWMAN_BASE + INTE] = 0x02
+
+    
+    # Enable the GPIO for trigger interrupt
+    mem32[POWMAN_BASE + PWRUP0] = PASS | 0xC0 | gpio
+
+    
+
+    _powmanPowerOff()
+    
