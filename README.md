@@ -73,21 +73,30 @@ This is required for bare-metal development and is safe in this context.
 
 ##  Main Functions
 
-### `powmanInit(absTimeMs uint64)`
+### `powmanInit(absTimeMs:int)`
 
 Initializes the internal timer using an absolute timestamp.
 
 ---
 
-### `powmanOffForMs(sleepingMs uint64)`
+### `powmanOffForMs(sleepingMs:int)`
 
 Puts the system in deep sleep mode and schedules a wake-up alarm.
 
+### `powmanOffUntilGPIO(gpio:int)`
 
-## Future Developments
+Puts the system in deep sleep mode and enable the *gpio* to awake system if triggered
+
+
+## Completed
 
 - Support for waking up from low-power mode via GPIO interrupts.
 
+## Future Developments
+
+- Optimize power management by disabling unnecessary components
+
+- Implement a sleep mode that does not reboot the system and preserves the values of variables like `machine.lighsleep()`
 ## Safety Notes
 
 * Only use in embedded/bare-metal environments.
