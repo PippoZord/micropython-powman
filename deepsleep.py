@@ -136,7 +136,7 @@ def powmanOffForMs(sleepingMs:int):
 
 # Force deep sleep until gpio HIGH
 def powmanOffUntilGPIO(gpio:int):
-    if gpio < 0 or gpio > 50:
+    if gpio < 0 or gpio > 49:
         raise Exception("gpio must be between 0 and 50")
     
     # Compute GPIO pad control register address
