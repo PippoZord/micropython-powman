@@ -110,7 +110,7 @@ def _powmanPowerOff():
     _forceReboot()
 
     # Switch off system
-    # Bit 3: SWCORE, Bit 2: XIP, Bit 1: SRAM0, Bit 0: SRAM11\
+    # Bit 3: SWCORE, Bit 2: XIP, Bit 1: SRAM0, Bit 0: SRAM1
     mem32[POWMAN_BASE + STATE] = PASS | 0x00F0
 
     # Wait for interrupt / alarm
@@ -145,12 +145,6 @@ def powmanOffForMs(sleepingMs:int):
     _powmanPowerOff()
     
 
-# Return the wake up reason
-# WAKEUP_GPIO0      = const(0x02)
-# WAKEUP_GPIO1      = const(0x04)
-# WAKEUP_GPIO2      = const(0x08)
-# WAKEUP_GPIO3      = const(0x10)
-# WAKEUP_ALARM      = const(0x40)
 def powmanGetWakeupReason() -> int:
     # HAD_SWCORE_PD (bit 25) is set only when POWMAN explicitly powered down SWCORE
     if mem32[POWMAN_BASE + CHIP_RESET] & (1 << 25):
@@ -160,7 +154,7 @@ def powmanGetWakeupReason() -> int:
 # Force deep sleep until gpio HIGH
 def powmanOffUntilGPIO(gpio:int):
     if gpio < 0 or gpio > 49:
-        raise Exception("gpio must be between 0 and 50")
+        raise Exception("gpio must be between 0 and 49")
     
     # Compute GPIO pad control register address
     GPIO_PAD_CTRL = PADS_BANK0_BASE + ((gpio+1) * 4)
