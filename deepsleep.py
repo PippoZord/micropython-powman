@@ -151,26 +151,24 @@ def powmanGetWakeupReason() -> int:
         return mem32[POWMAN_BASE + LAST_SWCORE_PWRUP]
     return 0  # fresh power-on or software reset
 
-# Force deep sleep until gpio HIGH
-def powmanOffUntilGPIO(gpio:int):
+# Force deep sleep until gpio level (True=HIGH, False=LOW).
+# IMPORTANT: the GPIO must already be at the OPPOSITE level before calling this.
+# POWMAN uses level-triggered detection and requires a transition to fire.
+# If high=True, GPIO must be LOW before sleep (then goes HIGH → wake).
+# If high=False, GPIO must be HIGH before sleep (then goes LOW → wake).
+# Sleeping while GPIO is already at the wake level will prevent the chip from waking.
+def powmanOffUntilGPIO(gpio: int, high: bool = True):
     if gpio < 0 or gpio > 49:
         raise Exception("gpio must be between 0 and 49")
-    
-    # Compute GPIO pad control register address
-    GPIO_PAD_CTRL = PADS_BANK0_BASE + ((gpio+1) * 4)
-    
-    # Set GPIO enable for interupt
-    mem32[GPIO_PAD_CTRL] = 0x44 
 
-    
-    # Set interrupt enable
+    GPIO_PAD_CTRL = PADS_BANK0_BASE + ((gpio + 1) * 4)
+    # IE (bit6) always on; PUE (bit3) for active-low, PDE (bit2) for active-high
+    mem32[GPIO_PAD_CTRL] = 0x48 if not high else 0x44
+
     mem32[POWMAN_BASE + INTE] = 0x02
 
-    
-    # Enable the GPIO for trigger interrupt
-    mem32[POWMAN_BASE + PWRUP0] = PASS | 0xC0 | gpio
-
-    
+    direction = 0x80 if high else 0x00  # bit 7: 1=HIGH_RISING, 0=LOW_FALLING
+    mem32[POWMAN_BASE + PWRUP0] = PASS | 0x40 | direction | gpio
 
     _powmanPowerOff()
     

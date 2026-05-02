@@ -149,9 +149,22 @@ Enters deep sleep and reboots after `sleepingMs` milliseconds. Never returns.
 
 ---
 
-### `powmanOffUntilGPIO(gpio: int)`
+### `powmanOffUntilGPIO(gpio: int, high: bool = True)`
 
-Enters deep sleep and reboots when the specified GPIO pin goes HIGH. `gpio` must be 0–49. Never returns.
+Enters deep sleep and reboots when the specified GPIO pin reaches the target level. `gpio` must be 0–49. Never returns.
+
+| Parameter | Description |
+|---|---|
+| `gpio` | GPIO pin number (0–49) |
+| `high` | `True` = wake on HIGH, `False` = wake on LOW |
+
+> **Important:** The GPIO must already be at the **opposite** level before calling this function.
+> POWMAN requires a level **transition** to fire — if the GPIO is already at the wake level when sleep is entered, the chip will never wake.
+>
+> | `high` | GPIO must be before sleep | Wake trigger |
+> |---|---|---|
+> | `True` | LOW | GPIO goes HIGH |
+> | `False` | HIGH | GPIO goes LOW |
 
 ---
 
