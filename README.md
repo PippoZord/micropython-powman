@@ -17,29 +17,73 @@ It is designed to control low-power modes, timers, and wake-up alarms on Raspber
 
 ## Usage
 
-### Initialize the Timer
+> **Important:** `powmanGetWakeupReason()` must be called **before** `powmanInit()`, because init writes to POWMAN registers that may affect wake-up state.
 
-Set the absolute system time in milliseconds:
+### 1. Check wake-up reason
 
 ```python
-deepsleep.powmanInit(0)
+import deepsleep
+
+reason = deepsleep.powmanGetWakeupReason()
+
+if reason == 0:
+    print("fresh boot")
+elif reason & deepsleep.WAKEUP_ALARM:
+    print("woke from timer")
+elif reason & deepsleep.WAKEUP_GPIO0:
+    print("woke from GPIO")
 ```
+
+### 2. Initialize the timer
+
+Set the absolute system time in milliseconds (must be > 0):
+
+```python
+deepsleep.powmanInit(1704067200)
+```
+
+### 3. Enter deep sleep
+
+Sleep for a fixed duration (milliseconds):
+
+```python
+deepsleep.powmanOffForMs(10000)  # sleep 10 seconds
+```
+
+Or sleep until a GPIO goes HIGH:
+
+```python
+deepsleep.powmanOffUntilGPIO(15)  # wake on GP15 HIGH
+```
+
+Both functions never return — the chip reboots on wake-up.
 
 ---
 
-### Enter Low-Power Mode for a Duration
+### Full example
 
-Put the system to sleep and wake it up after a given time:
+```python
+import deepsleep
+import time
 
-```go
-deepsleep.powmanOffForMs(10000) // Sleep for 10 seconds
+def main():
+    reason = deepsleep.powmanGetWakeupReason()  # before init!
+
+    if reason == 0:
+        print("fresh boot")
+    elif reason & deepsleep.WAKEUP_ALARM:
+        print("woke from timer alarm")
+    elif reason & (deepsleep.WAKEUP_GPIO0 | deepsleep.WAKEUP_GPIO1 |
+                   deepsleep.WAKEUP_GPIO2 | deepsleep.WAKEUP_GPIO3):
+        print("woke from GPIO")
+
+    deepsleep.powmanInit(1704067200)
+    deepsleep.powmanOffForMs(5000)
+
+main()
 ```
 
----
-
-### Typical Example
-
-In `main.py` there is an example that uses the Powman functions. The device blinks the internal LED and then enters low-power mode for 10 seconds.
+In `main.py` there is a minimal example`.
 
 Power consumption over one minute.
 
@@ -71,32 +115,56 @@ This is required for bare-metal development and is safe in this context.
 
 ---
 
-##  Main Functions
+## API Reference
 
-### `powmanInit(absTimeMs:int)`
+### `powmanGetWakeupReason() → int`
 
-Initializes the internal timer using an absolute timestamp.
+Returns the reason for the last wake-up as a bitmask. Must be called **before** `powmanInit()`.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `0` | `0x00` | Fresh boot / software reset |
+| `WAKEUP_CHIP_RESET` | `0x01` | Chip-level reset |
+| `WAKEUP_GPIO0` | `0x02` | Wake from PWRUP0 (used by `powmanOffUntilGPIO`) |
+| `WAKEUP_GPIO1` | `0x04` | Wake from PWRUP1 |
+| `WAKEUP_GPIO2` | `0x08` | Wake from PWRUP2 |
+| `WAKEUP_GPIO3` | `0x10` | Wake from PWRUP3 |
+| `WAKEUP_ALARM` | `0x40` | Wake from timer alarm |
+
+The register is a bitmask: multiple bits can be set simultaneously. Use `&` to test individual sources.
+
+Internally reads `CHIP_RESET.HAD_SWCORE_PD` (bit 25) to confirm a POWMAN sleep occurred, then reads `LAST_SWCORE_PWRUP` (offset `0xA0`) for the source.
 
 ---
 
-### `powmanOffForMs(sleepingMs:int)`
+### `powmanInit(absTimeMs: int)`
 
-Puts the system in deep sleep mode and schedules a wake-up alarm.
+Initializes the POWMAN timer with an absolute timestamp in milliseconds (must be > 0).
 
-### `powmanOffUntilGPIO(gpio:int)`
+---
 
-Puts the system in deep sleep mode and enable the *gpio* to awake system if triggered
+### `powmanOffForMs(sleepingMs: int)`
 
+Enters deep sleep and reboots after `sleepingMs` milliseconds. Never returns.
+
+---
+
+### `powmanOffUntilGPIO(gpio: int)`
+
+Enters deep sleep and reboots when the specified GPIO pin goes HIGH. `gpio` must be 0–49. Never returns.
+
+---
 
 ## Completed
 
-- Support for waking up from low-power mode via GPIO interrupts.
+- Timer-based deep sleep (`powmanOffForMs`)
+- GPIO wake-up (`powmanOffUntilGPIO`)
+- Wake-up reason detection (`powmanGetWakeupReason`)
 
 ## Future Developments
 
 - Optimize power management by disabling unnecessary components
-
-- Implement a sleep mode that does not reboot the system and preserves the values of variables like `machine.lighsleep()`
+- Implement a sleep mode that does not reboot the system and preserves the values of variables like `machine.lightsleep()`
 ## Safety Notes
 
 * Only use in embedded/bare-metal environments.

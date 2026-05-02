@@ -41,6 +41,17 @@ DBG_PWRCFG = const(0xA4)
 # OFFSET GPIO AWAKE
 PWRUP0 = const(0x8C)
 
+# OFFSET WAKEUP REASON
+CHIP_RESET        = const(0x2C)
+LAST_SWCORE_PWRUP = const(0xA0)
+
+# WAKEUP REASON BITMASK
+WAKEUP_CHIP_RESET = const(0x01)
+WAKEUP_GPIO0      = const(0x02)
+WAKEUP_GPIO1      = const(0x04)
+WAKEUP_GPIO2      = const(0x08)
+WAKEUP_GPIO3      = const(0x10)
+WAKEUP_ALARM      = const(0x40)
 
 # OFFSET PADS
 PADS_BANK0_BASE = 0x40038000
@@ -133,6 +144,18 @@ def powmanOffForMs(sleepingMs:int):
 
     _powmanPowerOff()
     
+
+# Return the wake up reason
+# WAKEUP_GPIO0      = const(0x02)
+# WAKEUP_GPIO1      = const(0x04)
+# WAKEUP_GPIO2      = const(0x08)
+# WAKEUP_GPIO3      = const(0x10)
+# WAKEUP_ALARM      = const(0x40)
+def powmanGetWakeupReason() -> int:
+    # HAD_SWCORE_PD (bit 25) is set only when POWMAN explicitly powered down SWCORE
+    if mem32[POWMAN_BASE + CHIP_RESET] & (1 << 25):
+        return mem32[POWMAN_BASE + LAST_SWCORE_PWRUP]
+    return 0  # fresh power-on or software reset
 
 # Force deep sleep until gpio HIGH
 def powmanOffUntilGPIO(gpio:int):
