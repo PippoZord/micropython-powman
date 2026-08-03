@@ -149,7 +149,7 @@ Enters deep sleep and reboots after `sleepingMs` milliseconds. Never returns.
 
 ---
 
-### `powmanOffUntilGPIO(gpio: int, high: bool = True)`
+### `powmanOffUntilGPIO(gpio: int, high: bool = True, slot: int = PWRUP0)`
 
 Enters deep sleep and reboots when the specified GPIO pin reaches the target level. `gpio` must be 0–49. Never returns.
 
@@ -157,6 +157,7 @@ Enters deep sleep and reboots when the specified GPIO pin reaches the target lev
 |---|---|
 | `gpio` | GPIO pin number (0–49) |
 | `high` | `True` = wake on HIGH, `False` = wake on LOW |
+| `slot` | Which of the 4 PWRUP registers to use (`PWRUP0`..`PWRUP3`). Defaults to `PWRUP0`. |
 
 > **Important:** The GPIO must already be at the **opposite** level before calling this function.
 > POWMAN requires a level **transition** to fire — if the GPIO is already at the wake level when sleep is entered, the chip will never wake.
@@ -168,10 +169,66 @@ Enters deep sleep and reboots when the specified GPIO pin reaches the target lev
 
 ---
 
+### `powmanOffUntilAnyGPIO(pins: list[tuple[int, bool]])`
+
+Enters deep sleep and reboots when **any** of up to 4 GPIO pins reaches its target level. `pins` is a list/tuple of up to 4 `(gpio, high)` pairs, each mapped to one of the 4 independent PWRUP wake-up slots. Never returns.
+
+```python
+# wake when GP15 goes HIGH or GP16 goes LOW
+deepsleep.powmanOffUntilAnyGPIO([(15, True), (16, False)])
+```
+
+The same transition requirement as `powmanOffUntilGPIO` applies to every pin. After reboot, use `powmanGetWakeupReason()` to tell which one fired: `pins[0]` → `WAKEUP_GPIO0`, `pins[1]` → `WAKEUP_GPIO1`, and so on.
+
+---
+
+## Debugging tip: no serial output after wake-up
+
+Waking up (from timer or GPIO) triggers a full chip reboot, which also resets the USB stack. Your serial terminal has to reconnect to the newly re-enumerated USB device, and usually doesn't do so fast enough to catch the first `print()` calls in `main()`.
+
+To verify wake-up behavior without relying on the serial terminal, blink the onboard LED a different number of times depending on `powmanGetWakeupReason()` — it's visible immediately and doesn't depend on USB reconnecting.
+
+```python
+from machine import Pin
+import time, deepsleep
+
+def blink(times):
+    led = Pin("LED", Pin.OUT)
+    for _ in range(times):
+        led.on()
+        time.sleep_ms(200)
+        led.off()
+        time.sleep_ms(200)
+
+def main():
+    reason = deepsleep.powmanGetWakeupReason()  # before init!
+
+    if reason & deepsleep.WAKEUP_GPIO0:
+        blink(1)   # woke from GP8
+    elif reason & deepsleep.WAKEUP_GPIO1:
+        blink(2)   # woke from GP9
+    elif reason & deepsleep.WAKEUP_GPIO2:
+        blink(3)   # woke from GP10
+    elif reason & deepsleep.WAKEUP_GPIO3:
+        blink(4)   # woke from GP11
+    elif reason & deepsleep.WAKEUP_ALARM:
+        blink(5)   # woke from timer alarm
+    else:
+        blink(6)   # fresh boot / other
+
+    deepsleep.powmanInit(1704067200)
+    deepsleep.powmanOffUntilAnyGPIO([(8, True), (9, True), (10, True), (11, True)])
+
+main()
+```
+
+---
+
 ## Completed
 
 - Timer-based deep sleep (`powmanOffForMs`)
 - GPIO wake-up (`powmanOffUntilGPIO`)
+- Multi-GPIO wake-up (`powmanOffUntilAnyGPIO`)
 - Wake-up reason detection (`powmanGetWakeupReason`)
 
 ## Future Developments

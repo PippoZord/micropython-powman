@@ -38,8 +38,13 @@ BOOT3 = const(0xDC)
 # OFFSET POWER CONFIGURATION
 DBG_PWRCFG = const(0xA4)
 
-# OFFSET GPIO AWAKE
+# OFFSET GPIO AWAKE (4 independent GPIO wake-up slots)
 PWRUP0 = const(0x8C)
+PWRUP1 = const(0x90)
+PWRUP2 = const(0x94)
+PWRUP3 = const(0x98)
+
+_PWRUP_REGS = (PWRUP0, PWRUP1, PWRUP2, PWRUP3)
 
 # OFFSET WAKEUP REASON
 CHIP_RESET        = const(0x2C)
@@ -151,24 +156,48 @@ def powmanGetWakeupReason() -> int:
         return mem32[POWMAN_BASE + LAST_SWCORE_PWRUP]
     return 0  # fresh power-on or software reset
 
-# Force deep sleep until gpio level (True=HIGH, False=LOW).
+# Arm one PWRUP slot (0-3) to trigger a wake-up on a GPIO transition.
 # IMPORTANT: the GPIO must already be at the OPPOSITE level before calling this.
 # POWMAN uses level-triggered detection and requires a transition to fire.
 # If high=True, GPIO must be LOW before sleep (then goes HIGH → wake).
 # If high=False, GPIO must be HIGH before sleep (then goes LOW → wake).
 # Sleeping while GPIO is already at the wake level will prevent the chip from waking.
-def powmanOffUntilGPIO(gpio: int, high: bool = True):
+def _armGpioWakeup(gpio: int, high: bool, slot: int):
     if gpio < 0 or gpio > 49:
         raise Exception("gpio must be between 0 and 49")
+
+    if slot not in _PWRUP_REGS:
+        raise Exception("slot must be one of PWRUP0, PWRUP1, PWRUP2, PWRUP3")
 
     GPIO_PAD_CTRL = PADS_BANK0_BASE + ((gpio + 1) * 4)
     # IE (bit6) always on; PUE (bit3) for active-low, PDE (bit2) for active-high
     mem32[GPIO_PAD_CTRL] = 0x48 if not high else 0x44
 
+    direction = 0x80 if high else 0x00  # bit 7: 1=HIGH_RISING, 0=LOW_FALLING
+    mem32[POWMAN_BASE + slot] = PASS | 0x40 | direction | gpio
+
+
+# Force deep sleep until gpio level (True=HIGH, False=LOW).
+# slot selects which of the 4 PWRUP registers to use (PWRUP0 by default).
+def powmanOffUntilGPIO(gpio: int, high: bool = True, slot=PWRUP0):
     mem32[POWMAN_BASE + INTE] = 0x02
 
-    direction = 0x80 if high else 0x00  # bit 7: 1=HIGH_RISING, 0=LOW_FALLING
-    mem32[POWMAN_BASE + PWRUP0] = PASS | 0x40 | direction | gpio
+    _armGpioWakeup(gpio, high, slot)
 
     _powmanPowerOff()
-    
+
+
+# Force deep sleep until ANY of up to 4 GPIOs reaches its target level.
+# pins: list/tuple of up to 4 (gpio, high) tuples, one per PWRUP slot.
+# Use powmanGetWakeupReason() after reboot to tell which one fired
+# (WAKEUP_GPIO0..WAKEUP_GPIO3 correspond to pins[0]..pins[3]).
+def powmanOffUntilAnyGPIO(pins):
+    if not 1 <= len(pins) <= 4:
+        raise Exception("pins must contain between 1 and 4 (gpio, high) tuples")
+
+    mem32[POWMAN_BASE + INTE] = 0x02
+
+    for slot, (gpio, high) in zip(_PWRUP_REGS, pins):
+        _armGpioWakeup(gpio, high, slot)
+
+    _powmanPowerOff()
