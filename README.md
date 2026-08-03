@@ -117,6 +117,10 @@ This is required for bare-metal development and is safe in this context.
 
 ## API Reference
 
+> **Note:** every `powmanOff*()` function below automatically **forces GP0-22 to LOW** before sleeping — actively driven (`machine.Pin(gpio, Pin.OUT, value=0)`), not just a weak pull — except whichever GPIO(s) you passed in as wake-up pins, or listed in the optional `excludeGpios=(...)` argument every `powmanOff*()` accepts. GPIO pads live in the always-on domain, so they stay live throughout dormant sleep regardless of what else is powered down; this doubles as a way to cut power to an accessory wired to a GPIO instead of `3V3` (which can't be switched off from software — see the capacitive-touch-button example in `main.py`). GP23-29 are left untouched (reserved for the wireless chip / ADC diode caveat on Pico 2 W — see the `lowPowerWifiChip` flag on `powmanInit` below).
+>
+> **Careful**: this actively drives every unexcluded GP0-22 — if any of them is wired to something else that's also actively driving it (not just a passive load), the two will fight. Pass every such GPIO in `excludeGpios` to leave it alone.
+
 ### `powmanGetWakeupReason() → int`
 
 Returns the reason for the last wake-up as a bitmask. Must be called **before** `powmanInit()`.
@@ -137,7 +141,7 @@ Internally reads `CHIP_RESET.HAD_SWCORE_PD` (bit 25) to confirm a POWMAN sleep o
 
 ---
 
-### `powmanInit(absTimeMs: int, lowPowerXosc=False, lowPowerRosc=False, lowPowerPlls=False, lowPowerUsbPhy=False, lowPowerWifiChip=False)`
+### `powmanInit(absTimeMs: int, lowPowerXosc=False, lowPowerRosc=False, lowPowerPlls=False, lowPowerUsbPhy=False, lowPowerWifiChip=False, excludeGpios=())`
 
 Initializes the POWMAN timer with an absolute timestamp in milliseconds (must be > 0).
 
@@ -150,6 +154,7 @@ The `lowPower*` flags enable extra, optional current-saving steps on top of the 
 | `lowPowerPlls` | Powers down `PLL_SYS`/`PLL_USB`. Requires `lowPowerXosc` (clk_sys must already be off the PLL path). |
 | `lowPowerUsbPhy` | Re-isolates the USB PHY (matches the RP2350 datasheet's own low-power test methodology). |
 | `lowPowerWifiChip` | **Pico 2 W only.** Powers down the CYW43439 wireless companion chip. No-op on plain Pico 2, or if the chip was never powered up. |
+| `excludeGpios` | GPIO(s) — a single int or a list/tuple — that the automatic GP0-22 force-low pass should always leave alone, on every subsequent `powmanOff*()` call. Combined with whatever `excludeGpios` each individual call also specifies. |
 
 **Risk**: `lowPowerRosc` and `lowPowerPlls` carry real risk — if clocks aren't moved off an oscillator/PLL before it's stopped, the chip hangs and needs a physical reset/reflash (BOOTSEL) to recover. Only tested on Pico 2 (RP2350) with stock boot clock configuration. `lowPowerUsbPhy`/`lowPowerWifiChip` are low risk (no clock changes).
 
@@ -168,13 +173,13 @@ In testing (Pico 2 W, `lowPowerXosc`/`lowPowerRosc`/`lowPowerUsbPhy`/`lowPowerWi
 
 ---
 
-### `powmanOffForMs(sleepingMs: int, beforeSleep=None)`
+### `powmanOffForMs(sleepingMs: int, beforeSleep=None, excludeGpios=())`
 
-Enters deep sleep and reboots after `sleepingMs` milliseconds. Never returns.
+Enters deep sleep and reboots after `sleepingMs` milliseconds. Never returns. Since there's no wake-up GPIO here, every GP0-22 not listed in `excludeGpios` gets forced low.
 
 ---
 
-### `powmanOffUntilGPIO(gpio: int, high: bool = True, slot: int = PWRUP0, beforeSleep=None)`
+### `powmanOffUntilGPIO(gpio: int, high: bool = True, slot: int = PWRUP0, beforeSleep=None, excludeGpios=())`
 
 Enters deep sleep and reboots when the specified GPIO pin reaches the target level. `gpio` must be 0–49. Never returns.
 
@@ -183,7 +188,8 @@ Enters deep sleep and reboots when the specified GPIO pin reaches the target lev
 | `gpio` | GPIO pin number (0–49) |
 | `high` | `True` = wake on HIGH, `False` = wake on LOW |
 | `slot` | Which of the 4 PWRUP registers to use (`PWRUP0`..`PWRUP3`). Defaults to `PWRUP0`. |
-| `beforeSleep` | Optional callable, invoked last, right before the chip actually halts (see "Going below the RP2350's own domain power-down" below). |
+| `beforeSleep` | Optional callable, invoked last, right before the chip actually halts. |
+| `excludeGpios` | Extra GPIOs (besides `gpio` itself) to leave untouched by the automatic force-low pass — see the note at the top of the API Reference. |
 
 > **Important:** The GPIO must already be at the **opposite** level before calling this function.
 > POWMAN requires a level **transition** to fire — if the GPIO is already at the wake level when sleep is entered, the chip will never wake.
@@ -195,7 +201,7 @@ Enters deep sleep and reboots when the specified GPIO pin reaches the target lev
 
 ---
 
-### `powmanOffUntilAnyGPIO(pins: list[tuple[int, bool]], beforeSleep=None)`
+### `powmanOffUntilAnyGPIO(pins: list[tuple[int, bool]], beforeSleep=None, excludeGpios=())`
 
 Enters deep sleep and reboots when **any** of up to 4 GPIO pins reaches its target level. `pins` is a list/tuple of up to 4 `(gpio, high)` pairs, each mapped to one of the 4 independent PWRUP wake-up slots. Never returns.
 
@@ -208,7 +214,7 @@ The same transition requirement as `powmanOffUntilGPIO` applies to every pin. Af
 
 ---
 
-### `powmanOffForMsOrGPIO(sleepingMs: int, pins: list[tuple[int, bool]], beforeSleep=None)`
+### `powmanOffForMsOrGPIO(sleepingMs: int, pins: list[tuple[int, bool]], beforeSleep=None, excludeGpios=())`
 
 Enters deep sleep and reboots when **either** the timer alarm expires **or** any of up to 4 GPIO pins reaches its target level — whichever happens first. Never returns.
 
@@ -271,6 +277,7 @@ main()
 - Combined timer + multi-GPIO wake-up (`powmanOffForMsOrGPIO`)
 - Wake-up reason detection (`powmanGetWakeupReason`)
 - Optimize power management by disabling unnecessary components (`lowPowerXosc`/`lowPowerRosc`/`lowPowerPlls`/`lowPowerUsbPhy`/`lowPowerWifiChip` on `powmanInit`) — ~600µA → ~230-250µA measured on Pico 2 W (`lowPowerPlls` not yet measured)
+- Automatic force-low of unexcluded GPIOs (GP0-22) before sleep via `excludeGpios`, to avoid leakage from floating inputs and to let accessories be powered from a GPIO instead of `3V3` (which can't be switched off from software)
 
 ## Future Developments
 

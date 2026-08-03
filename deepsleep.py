@@ -67,7 +67,15 @@ PADS_BANK0_BASE = 0x40038000
 # so callers don't need to build their own beforeSleep callback just to use
 # the built-in optimizations. stopXosc is applied immediately here (safe to
 # do early); the rest are deferred and applied last, right before idle().
-_LOW_POWER = {"rosc": False, "plls": False, "usbPhy": False, "wifiChip": False}
+_LOW_POWER = {"rosc": False, "plls": False, "usbPhy": False, "wifiChip": False, "excludeGpios": ()}
+
+
+# Accepts either a single GPIO number or a list/tuple of them, and always
+# returns an iterable — lets excludeGpios=6 and excludeGpios=(6, 7) both work.
+def _asGpioIter(gpios):
+    if isinstance(gpios, int):
+        return (gpios,)
+    return gpios
 
 
 # Initialize POWMAN clock and set absolute time in ms.
@@ -78,8 +86,13 @@ _LOW_POWER = {"rosc": False, "plls": False, "usbPhy": False, "wifiChip": False}
 # applies them automatically, without needing a manual beforeSleep callback.
 # lowPowerPlls requires lowPowerXosc (or a prior stopXosc() call) — see
 # powerDownPlls() below.
+# excludeGpios lists GPIO(s) (a single int or a list/tuple) that the
+# automatic GP0-22 force-low pass (see _quiesceUnusedGpios below) should
+# always leave alone, on every subsequent powmanOff*() call — on top of
+# whichever excludeGpios each individual call also specifies.
 def powmanInit(absTimeMs:int, lowPowerXosc=False, lowPowerRosc=False,
-               lowPowerPlls=False, lowPowerUsbPhy=False, lowPowerWifiChip=False):
+               lowPowerPlls=False, lowPowerUsbPhy=False, lowPowerWifiChip=False,
+               excludeGpios=()):
     if absTimeMs < 1 :
         raise Exception("absTimeMs must be greater than 0")
 
@@ -106,10 +119,11 @@ def powmanInit(absTimeMs:int, lowPowerXosc=False, lowPowerRosc=False,
     if lowPowerXosc:
         stopXosc()
 
-    _LOW_POWER["rosc"]     = lowPowerRosc
-    _LOW_POWER["plls"]     = lowPowerPlls
-    _LOW_POWER["usbPhy"]   = lowPowerUsbPhy
-    _LOW_POWER["wifiChip"] = lowPowerWifiChip
+    _LOW_POWER["rosc"]         = lowPowerRosc
+    _LOW_POWER["plls"]         = lowPowerPlls
+    _LOW_POWER["usbPhy"]       = lowPowerUsbPhy
+    _LOW_POWER["wifiChip"]     = lowPowerWifiChip
+    _LOW_POWER["excludeGpios"] = _asGpioIter(excludeGpios)
 
 
 # Return current POWMAN time (64-bit)
@@ -144,10 +158,47 @@ def _applyLowPowerConfig():
         powerDownWifiChip()
 
 
+# Default range of GPIOs automatically forced low before sleep (see
+# _quiesceUnusedGpios below), skipping whichever ones are excluded (wake
+# GPIOs, plus anything the caller lists in excludeGpios). GP23-29 are left
+# out of this range on purpose: on Pico 2 W several of them are reserved for
+# the wireless chip (23, 24, 25, 29) or carry the ADC reverse-diode caveat
+# (26-28) from the Pico 2 W datasheet — forcing those low unconditionally
+# could interfere with functions this library doesn't control. Only GP0-22
+# (plain digital GPIO) are touched automatically.
+_QUIESCE_GPIO_RANGE = range(0, 23)
+
+
+# Forces every GPIO in _QUIESCE_GPIO_RANGE that isn't in exclude to LOW
+# before sleeping — e.g. to cut power to an accessory wired to a GPIO
+# instead of 3V3 (which can't be switched off from software). GPIO pads live
+# in the always-on domain (same reason the wake GPIOs keep working with
+# SWCORE off), so they stay live throughout dormant regardless of what else
+# is powered down.
+#
+# This actively drives each pin low (via machine.Pin, not just a pull
+# resistor), then also sets the pad's own pull-down as a fallback for once
+# SWCORE (and the SIO logic actually doing the driving) powers off. If any
+# excluded GPIO is left floating on purpose, or any non-excluded GPIO is
+# wired to something else actively driving it from outside, forcing it low
+# here will fight that external driver — only exclude/wire accordingly.
+def _quiesceUnusedGpios(exclude):
+    for gpio in _QUIESCE_GPIO_RANGE:
+        if gpio in exclude:
+            continue
+        Pin(gpio, Pin.OUT, value=0)
+        GPIO_PAD_CTRL = PADS_BANK0_BASE + ((gpio + 1) * 4)
+        mem32[GPIO_PAD_CTRL] |= 0x04  # also enable pull-down (PDE) as a fallback
+
+
 # Force dormant mode and set reboot enable.
-# beforeSleep, if given, is called last (after _applyLowPowerConfig() and
-# right before idle()) for any additional custom setup callers want to run.
-def _powmanPowerOff(beforeSleep=None):
+# excludeGpios lists whichever GPIOs must NOT be forced low by the automatic
+# GPIO quiescing above — wake GPIOs (added automatically by the caller) plus
+# anything the library user passed in via excludeGpios on a powmanOff*()
+# call. beforeSleep, if given, is called last (after _applyLowPowerConfig()
+# and right before idle()) for any additional custom setup callers want to
+# run.
+def _powmanPowerOff(beforeSleep=None, excludeGpios=()):
     # Set low power mode
     mem32[POWMAN_BASE + VREG_LP_ENTRY] = PASS | 0x0004
 
@@ -156,6 +207,8 @@ def _powmanPowerOff(beforeSleep=None):
     # Switch off system
     # Bit 3: SWCORE, Bit 2: XIP, Bit 1: SRAM0, Bit 0: SRAM1
     mem32[POWMAN_BASE + STATE] = PASS | 0x00F0
+
+    _quiesceUnusedGpios(list(_asGpioIter(excludeGpios)) + list(_LOW_POWER["excludeGpios"]))
 
     _applyLowPowerConfig()
 
@@ -192,13 +245,13 @@ def _armAlarm(sleepingMs: int):
 # Start dormant mode.
 # create and set alarm which trigger awake after sleepingMs.
 # sleepingMs must be > 0
-def powmanOffForMs(sleepingMs:int, beforeSleep=None):
+def powmanOffForMs(sleepingMs:int, beforeSleep=None, excludeGpios=()):
     # Enable interrupt
     mem32[POWMAN_BASE + INTE] = PASS | 0x02
 
     _armAlarm(sleepingMs)
 
-    _powmanPowerOff(beforeSleep)
+    _powmanPowerOff(beforeSleep, excludeGpios)
 
 
 def powmanGetWakeupReason() -> int:
@@ -230,19 +283,19 @@ def _armGpioWakeup(gpio: int, high: bool, slot: int):
 
 # Force deep sleep until gpio level (True=HIGH, False=LOW).
 # slot selects which of the 4 PWRUP registers to use (PWRUP0 by default).
-def powmanOffUntilGPIO(gpio: int, high: bool = True, slot=PWRUP0, beforeSleep=None):
+def powmanOffUntilGPIO(gpio: int, high: bool = True, slot=PWRUP0, beforeSleep=None, excludeGpios=()):
     mem32[POWMAN_BASE + INTE] = 0x02
 
     _armGpioWakeup(gpio, high, slot)
 
-    _powmanPowerOff(beforeSleep)
+    _powmanPowerOff(beforeSleep, excludeGpios=(gpio,) + tuple(_asGpioIter(excludeGpios)))
 
 
 # Force deep sleep until ANY of up to 4 GPIOs reaches its target level.
 # pins: list/tuple of up to 4 (gpio, high) tuples, one per PWRUP slot.
 # Use powmanGetWakeupReason() after reboot to tell which one fired
 # (WAKEUP_GPIO0..WAKEUP_GPIO3 correspond to pins[0]..pins[3]).
-def powmanOffUntilAnyGPIO(pins, beforeSleep=None):
+def powmanOffUntilAnyGPIO(pins, beforeSleep=None, excludeGpios=()):
     if not 1 <= len(pins) <= 4:
         raise Exception("pins must contain between 1 and 4 (gpio, high) tuples")
 
@@ -251,7 +304,7 @@ def powmanOffUntilAnyGPIO(pins, beforeSleep=None):
     for slot, (gpio, high) in zip(_PWRUP_REGS, pins):
         _armGpioWakeup(gpio, high, slot)
 
-    _powmanPowerOff(beforeSleep)
+    _powmanPowerOff(beforeSleep, excludeGpios=[gpio for gpio, _ in pins] + list(_asGpioIter(excludeGpios)))
 
 
 # Force deep sleep until EITHER the timer alarm expires OR any of up to 4 GPIOs
@@ -259,7 +312,7 @@ def powmanOffUntilAnyGPIO(pins, beforeSleep=None):
 # sleepingMs must be > 0. pins: list/tuple of up to 4 (gpio, high) tuples.
 # Use powmanGetWakeupReason() after reboot to tell which one fired
 # (WAKEUP_ALARM for the timer, WAKEUP_GPIO0..WAKEUP_GPIO3 for pins[0]..pins[3]).
-def powmanOffForMsOrGPIO(sleepingMs: int, pins, beforeSleep=None):
+def powmanOffForMsOrGPIO(sleepingMs: int, pins, beforeSleep=None, excludeGpios=()):
     if not 1 <= len(pins) <= 4:
         raise Exception("pins must contain between 1 and 4 (gpio, high) tuples")
 
@@ -270,7 +323,7 @@ def powmanOffForMsOrGPIO(sleepingMs: int, pins, beforeSleep=None):
     for slot, (gpio, high) in zip(_PWRUP_REGS, pins):
         _armGpioWakeup(gpio, high, slot)
 
-    _powmanPowerOff(beforeSleep)
+    _powmanPowerOff(beforeSleep, excludeGpios=[gpio for gpio, _ in pins] + list(_asGpioIter(excludeGpios)))
 
 
 # EXPERIMENTAL: stopping XOSC/ROSC before sleeping (higher risk)
