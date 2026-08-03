@@ -1,4 +1,4 @@
-from machine import mem32, idle
+from machine import mem32, idle, Pin
 from micropython import const
 
 # POWMAN BASE ADDRESS
@@ -62,9 +62,22 @@ WAKEUP_ALARM      = const(0x40)
 PADS_BANK0_BASE = 0x40038000
 
 
-# Initialize POWMAN clock and set absolute time in ms
-# absTimeMs must be > 0
-def powmanInit(absTimeMs:int):
+# Which optional low-power steps (see the sections below) _powmanPowerOff()
+# applies automatically before idle(). Configured once via powmanInit(),
+# so callers don't need to build their own beforeSleep callback just to use
+# the built-in optimizations. stopXosc is applied immediately here (safe to
+# do early); the rest are deferred and applied last, right before idle().
+_LOW_POWER = {"rosc": False, "usbPhy": False, "wifiChip": False}
+
+
+# Initialize POWMAN clock and set absolute time in ms.
+# absTimeMs must be > 0.
+# lowPowerXosc/Rosc/UsbPhy/WifiChip enable the optional extra power-saving
+# steps documented below (stopXosc/stopRosc/isolateUsbPhy/powerDownWifiChip)
+# — enabling them here means powmanOff*() applies them automatically,
+# without needing a manual beforeSleep callback.
+def powmanInit(absTimeMs:int, lowPowerXosc=False, lowPowerRosc=False,
+               lowPowerUsbPhy=False, lowPowerWifiChip=False):
     if absTimeMs < 1 :
         raise Exception("absTimeMs must be greater than 0")
 
@@ -72,9 +85,9 @@ def powmanInit(absTimeMs:int):
 
     # Stop timer
     mem32[POWMAN_BASE + TIMER] = PASS | 0x00
-    
+
     mem32[POWMAN_BASE + PWRUP0] = PASS | 0x200
-    
+
     # Set time (64 bit split in 4 x 16 bit)
     mem32[POWMAN_BASE + SET_TIME_15TO0]  = PASS | (absTimeMs & 0xFFFF)
     mem32[POWMAN_BASE + SET_TIME_31TO16] = PASS | ((absTimeMs >> 16) & 0xFFFF)
@@ -87,6 +100,13 @@ def powmanInit(absTimeMs:int):
 
     # Ignore debugger
     mem32[POWMAN_BASE + DBG_PWRCFG] = PASS | 0x01
+
+    if lowPowerXosc:
+        stopXosc()
+
+    _LOW_POWER["rosc"]     = lowPowerRosc
+    _LOW_POWER["usbPhy"]   = lowPowerUsbPhy
+    _LOW_POWER["wifiChip"] = lowPowerWifiChip
 
 
 # Return current POWMAN time (64-bit)
@@ -107,8 +127,22 @@ def _forceReboot():
     mem32[POWMAN_BASE + BOOT3] = 0
 
 
-# Force dormant mode and set reboot enable
-def _powmanPowerOff():
+# Applies whichever optional low-power steps were enabled via powmanInit().
+# Called last, right before idle() — everything else (arming alarm/GPIOs)
+# must already be done, since code after this may run much slower.
+def _applyLowPowerConfig():
+    if _LOW_POWER["rosc"]:
+        stopRosc()
+    if _LOW_POWER["usbPhy"]:
+        isolateUsbPhy()
+    if _LOW_POWER["wifiChip"]:
+        powerDownWifiChip()
+
+
+# Force dormant mode and set reboot enable.
+# beforeSleep, if given, is called last (after _applyLowPowerConfig() and
+# right before idle()) for any additional custom setup callers want to run.
+def _powmanPowerOff(beforeSleep=None):
     # Set low power mode
     mem32[POWMAN_BASE + VREG_LP_ENTRY] = PASS | 0x0004
 
@@ -117,6 +151,11 @@ def _powmanPowerOff():
     # Switch off system
     # Bit 3: SWCORE, Bit 2: XIP, Bit 1: SRAM0, Bit 0: SRAM1
     mem32[POWMAN_BASE + STATE] = PASS | 0x00F0
+
+    _applyLowPowerConfig()
+
+    if beforeSleep:
+        beforeSleep()
 
     # Wait for interrupt / alarm
     idle() # = WFI
@@ -148,13 +187,13 @@ def _armAlarm(sleepingMs: int):
 # Start dormant mode.
 # create and set alarm which trigger awake after sleepingMs.
 # sleepingMs must be > 0
-def powmanOffForMs(sleepingMs:int):
+def powmanOffForMs(sleepingMs:int, beforeSleep=None):
     # Enable interrupt
     mem32[POWMAN_BASE + INTE] = PASS | 0x02
 
     _armAlarm(sleepingMs)
 
-    _powmanPowerOff()
+    _powmanPowerOff(beforeSleep)
 
 
 def powmanGetWakeupReason() -> int:
@@ -186,19 +225,19 @@ def _armGpioWakeup(gpio: int, high: bool, slot: int):
 
 # Force deep sleep until gpio level (True=HIGH, False=LOW).
 # slot selects which of the 4 PWRUP registers to use (PWRUP0 by default).
-def powmanOffUntilGPIO(gpio: int, high: bool = True, slot=PWRUP0):
+def powmanOffUntilGPIO(gpio: int, high: bool = True, slot=PWRUP0, beforeSleep=None):
     mem32[POWMAN_BASE + INTE] = 0x02
 
     _armGpioWakeup(gpio, high, slot)
 
-    _powmanPowerOff()
+    _powmanPowerOff(beforeSleep)
 
 
 # Force deep sleep until ANY of up to 4 GPIOs reaches its target level.
 # pins: list/tuple of up to 4 (gpio, high) tuples, one per PWRUP slot.
 # Use powmanGetWakeupReason() after reboot to tell which one fired
 # (WAKEUP_GPIO0..WAKEUP_GPIO3 correspond to pins[0]..pins[3]).
-def powmanOffUntilAnyGPIO(pins):
+def powmanOffUntilAnyGPIO(pins, beforeSleep=None):
     if not 1 <= len(pins) <= 4:
         raise Exception("pins must contain between 1 and 4 (gpio, high) tuples")
 
@@ -207,7 +246,7 @@ def powmanOffUntilAnyGPIO(pins):
     for slot, (gpio, high) in zip(_PWRUP_REGS, pins):
         _armGpioWakeup(gpio, high, slot)
 
-    _powmanPowerOff()
+    _powmanPowerOff(beforeSleep)
 
 
 # Force deep sleep until EITHER the timer alarm expires OR any of up to 4 GPIOs
@@ -215,7 +254,7 @@ def powmanOffUntilAnyGPIO(pins):
 # sleepingMs must be > 0. pins: list/tuple of up to 4 (gpio, high) tuples.
 # Use powmanGetWakeupReason() after reboot to tell which one fired
 # (WAKEUP_ALARM for the timer, WAKEUP_GPIO0..WAKEUP_GPIO3 for pins[0]..pins[3]).
-def powmanOffForMsOrGPIO(sleepingMs: int, pins):
+def powmanOffForMsOrGPIO(sleepingMs: int, pins, beforeSleep=None):
     if not 1 <= len(pins) <= 4:
         raise Exception("pins must contain between 1 and 4 (gpio, high) tuples")
 
@@ -226,4 +265,125 @@ def powmanOffForMsOrGPIO(sleepingMs: int, pins):
     for slot, (gpio, high) in zip(_PWRUP_REGS, pins):
         _armGpioWakeup(gpio, high, slot)
 
-    _powmanPowerOff()
+    _powmanPowerOff(beforeSleep)
+
+
+# EXPERIMENTAL: stopping XOSC/ROSC before sleeping (higher risk)
+#
+# Stops the external crystal (XOSC) and, optionally, the ring oscillator
+# (ROSC) before entering POWMAN dormant mode, to save the current they draw
+# while running (they live in the always-on domain, so the SWCORE/XIP/SRAM
+# power-down above does not touch them). Call stopXosc() and/or stopRosc()
+# right before a powmanOff*() call — typically via its beforeSleep hook, so
+# arming the alarm/GPIOs happens first while the clock is still fast. There
+# is no "wake back up" function: every powmanOff*() wakes via a full chip
+# reboot, and the boot ROM reinitializes clocks from scratch, so nothing
+# needs restoring here.
+#
+# The POWMAN alarm timer is unaffected by either of these: per the RP2350
+# register docs, POWMAN_TIMER always starts out clocked from its own internal
+# LPOSC, and only moves to XOSC if something explicitly sets
+# POWMAN_TIMER_USE_XOSC — this library never does, so the alarm keeps
+# ticking correctly regardless of what happens to XOSC/ROSC.
+#
+# RISK: clk_sys/clk_ref must be moved off an oscillator before it is stopped,
+# otherwise the system clock disappears and the chip hangs (requires a
+# physical reset/reflash to recover). stopRosc() must be called after
+# stopXosc() (it assumes clk_ref/clk_sys are no longer sourced from XOSC).
+# This has only been tested on Pico 2 (RP2350) with stock boot clock
+# configuration.
+
+CLOCKS_BASE = const(0x40010000)
+XOSC_BASE   = const(0x40048000)
+ROSC_BASE   = const(0x400E8000)
+
+CLK_REF_CTRL     = const(0x30)
+CLK_REF_SELECTED = const(0x38)
+CLK_SYS_CTRL     = const(0x3C)
+CLK_SYS_SELECTED = const(0x44)
+
+XOSC_DORMANT = const(0x08)
+ROSC_DORMANT = const(0x10)
+
+OSC_DORMANT_VALUE = const(0x636F6D61)  # "coma"
+
+CLK_REF_SRC_ROSC    = const(0x0)
+CLK_REF_SRC_LPOSC   = const(0x3)
+CLK_SYS_SRC_CLK_REF = const(0x0)
+
+# one-hot: bit N set once the glitchless mux has actually settled on source N
+CLK_REF_SELECTED_ROSC    = const(1 << 0)
+CLK_REF_SELECTED_LPOSC   = const(1 << 3)
+CLK_SYS_SELECTED_CLK_REF = const(1 << 0)
+
+
+# Move clk_ref and clk_sys off XOSC/PLL onto the ring oscillator (ROSC), then
+# stop XOSC. Only call this right before going to sleep.
+# ROSC is not touched here: it's enabled by default at power-up, and blindly
+# writing its control register would also clobber its FREQ_RANGE field.
+def stopXosc():
+    # clk_ref: switch away from XOSC onto ROSC. The glitchless mux doesn't
+    # switch instantly, so wait for CLK_REF_SELECTED to confirm it before
+    # relying on it downstream (same pattern the pico-sdk's clock_configure()
+    # uses).
+    mem32[CLOCKS_BASE + CLK_REF_CTRL] = CLK_REF_SRC_ROSC
+    while not (mem32[CLOCKS_BASE + CLK_REF_SELECTED] & CLK_REF_SELECTED_ROSC):
+        pass
+
+    # clk_sys: switch away from the PLL/aux path onto clk_ref (now ROSC-backed).
+    mem32[CLOCKS_BASE + CLK_SYS_CTRL] = CLK_SYS_SRC_CLK_REF
+    while not (mem32[CLOCKS_BASE + CLK_SYS_SELECTED] & CLK_SYS_SELECTED_CLK_REF):
+        pass
+
+    # Nothing left depends on XOSC now — stop it.
+    mem32[XOSC_BASE + XOSC_DORMANT] = OSC_DORMANT_VALUE
+
+
+# Move clk_ref (and, transitively, clk_sys) off ROSC onto POWMAN's own
+# low-power oscillator (LPOSC, always on), then stop ROSC.
+# Call this AFTER stopXosc() — it assumes clk_ref is currently on ROSC.
+def stopRosc():
+    mem32[CLOCKS_BASE + CLK_REF_CTRL] = CLK_REF_SRC_LPOSC
+    while not (mem32[CLOCKS_BASE + CLK_REF_SELECTED] & CLK_REF_SELECTED_LPOSC):
+        pass
+
+    # Nothing left depends on ROSC now — stop it.
+    mem32[ROSC_BASE + ROSC_DORMANT] = OSC_DORMANT_VALUE
+
+
+# USB PHY isolation (low risk)
+#
+# Re-isolates the USB PHY before entering POWMAN dormant mode, matching the
+# methodology the RP2350 datasheet itself uses for its own documented
+# low-power current figures (section 14.9.7.2): MAIN_CTRL.PHY_ISO=1 with the
+# DP/DM pulldowns enabled. PHY_ISO defaults to 1 (isolated) at reset and gets
+# cleared by MicroPython's own USB init to run the serial console — this
+# just puts it back before sleeping, since the reboot on wake reinitializes
+# USB from scratch regardless.
+#
+# Lower risk than stopXosc()/stopRosc(): this only isolates a peripheral, it
+# does not touch clk_sys/clk_ref, so there is no clock-hang risk. Call this
+# right before going to sleep (e.g. as part of a powmanOff*() beforeSleep
+# hook) — any USB activity (like the serial console) still in flight at that
+# point will just disconnect a little earlier than the reboot would do anyway.
+
+USBCTRL_REGS_BASE = const(0x50110000)
+
+MAIN_CTRL = const(0x40)
+SIE_CTRL  = const(0x4C)
+
+MAIN_CTRL_PHY_ISO    = const(1 << 2)
+SIE_CTRL_PULLDOWN_EN = const(1 << 15)
+
+
+def isolateUsbPhy():
+    mem32[USBCTRL_REGS_BASE + MAIN_CTRL] |= MAIN_CTRL_PHY_ISO
+    mem32[USBCTRL_REGS_BASE + SIE_CTRL]  |= SIE_CTRL_PULLDOWN_EN
+
+
+# CYW43439 wireless chip power-down (Pico 2 W only, low risk)
+CYW43_WL_REG_ON = const(23)
+
+
+def powerDownWifiChip():
+    Pin(CYW43_WL_REG_ON, Pin.OUT, value=0)

@@ -137,19 +137,21 @@ Internally reads `CHIP_RESET.HAD_SWCORE_PD` (bit 25) to confirm a POWMAN sleep o
 
 ---
 
-### `powmanInit(absTimeMs: int)`
+### `powmanInit(absTimeMs: int, lowPowerXosc=False, lowPowerRosc=False, lowPowerUsbPhy=False, lowPowerWifiChip=False)`
 
 Initializes the POWMAN timer with an absolute timestamp in milliseconds (must be > 0).
 
+The `lowPower*` flags enable the optional extra power-saving steps described in "Going below the RP2350's own domain power-down" below (`stopXosc`/`stopRosc`/`isolateUsbPhy`/`powerDownWifiChip`). Enabling them here means every subsequent `powmanOff*()` call applies them automatically — no need to build a `beforeSleep` callback yourself just to use the built-in optimizations. `lowPowerXosc` takes effect immediately; the other three are deferred and applied last, right before the chip halts.
+
 ---
 
-### `powmanOffForMs(sleepingMs: int)`
+### `powmanOffForMs(sleepingMs: int, beforeSleep=None)`
 
 Enters deep sleep and reboots after `sleepingMs` milliseconds. Never returns.
 
 ---
 
-### `powmanOffUntilGPIO(gpio: int, high: bool = True, slot: int = PWRUP0)`
+### `powmanOffUntilGPIO(gpio: int, high: bool = True, slot: int = PWRUP0, beforeSleep=None)`
 
 Enters deep sleep and reboots when the specified GPIO pin reaches the target level. `gpio` must be 0–49. Never returns.
 
@@ -158,6 +160,7 @@ Enters deep sleep and reboots when the specified GPIO pin reaches the target lev
 | `gpio` | GPIO pin number (0–49) |
 | `high` | `True` = wake on HIGH, `False` = wake on LOW |
 | `slot` | Which of the 4 PWRUP registers to use (`PWRUP0`..`PWRUP3`). Defaults to `PWRUP0`. |
+| `beforeSleep` | Optional callable, invoked last, right before the chip actually halts (see "Going below the RP2350's own domain power-down" below). |
 
 > **Important:** The GPIO must already be at the **opposite** level before calling this function.
 > POWMAN requires a level **transition** to fire — if the GPIO is already at the wake level when sleep is entered, the chip will never wake.
@@ -169,7 +172,7 @@ Enters deep sleep and reboots when the specified GPIO pin reaches the target lev
 
 ---
 
-### `powmanOffUntilAnyGPIO(pins: list[tuple[int, bool]])`
+### `powmanOffUntilAnyGPIO(pins: list[tuple[int, bool]], beforeSleep=None)`
 
 Enters deep sleep and reboots when **any** of up to 4 GPIO pins reaches its target level. `pins` is a list/tuple of up to 4 `(gpio, high)` pairs, each mapped to one of the 4 independent PWRUP wake-up slots. Never returns.
 
@@ -182,7 +185,7 @@ The same transition requirement as `powmanOffUntilGPIO` applies to every pin. Af
 
 ---
 
-### `powmanOffForMsOrGPIO(sleepingMs: int, pins: list[tuple[int, bool]])`
+### `powmanOffForMsOrGPIO(sleepingMs: int, pins: list[tuple[int, bool]], beforeSleep=None)`
 
 Enters deep sleep and reboots when **either** the timer alarm expires **or** any of up to 4 GPIO pins reaches its target level — whichever happens first. Never returns.
 
@@ -192,6 +195,33 @@ deepsleep.powmanOffForMsOrGPIO(10000, [(15, True)])
 ```
 
 Same transition requirement as `powmanOffUntilGPIO`/`powmanOffUntilAnyGPIO` applies to every pin. After reboot, `powmanGetWakeupReason()` tells you which source actually fired: `WAKEUP_ALARM` for the timer, `WAKEUP_GPIO0`..`WAKEUP_GPIO3` for `pins[0]`..`pins[3]`.
+
+---
+
+## Going below the RP2350's own domain power-down (experimental)
+
+`powmanOff*()` powers down SWCORE/XIP/SRAM0/SRAM1 (RP2350 low-power state P1.7). Everything below is optional, additional current savings on top of that, all included directly in `deepsleep.py`. Enable whichever you want via `powmanInit()`'s `lowPower*` flags — no `beforeSleep` callback needed:
+
+```python
+import deepsleep
+
+deepsleep.powmanInit(1704067200, lowPowerXosc=True, lowPowerRosc=True,
+                      lowPowerUsbPhy=True, lowPowerWifiChip=True)
+
+deepsleep.powmanOffForMsOrGPIO(10000, [(8, True)])
+```
+
+Internally, `lowPowerXosc` calls `stopXosc()` right away (safe to do early), while `lowPowerRosc`/`lowPowerUsbPhy`/`lowPowerWifiChip` are deferred and applied automatically inside `_powmanPowerOff()`, right before the chip actually halts — after arming the alarm/GPIOs, in the right order. If you need something custom beyond these four, every `powmanOff*()` still accepts a `beforeSleep` callable, invoked right after the automatic ones.
+
+- **`stopXosc()` / `stopRosc()`** — the crystal oscillator (XOSC) and ring oscillator (ROSC) live in the always-on domain and keep running (and drawing current) even after `powmanOff*()`. `stopXosc()` moves `clk_ref`/`clk_sys` onto ROSC and stops the crystal; `stopRosc()` moves them again onto POWMAN's internal LPOSC (32.768 kHz — thousands of times slower than the normal system clock) and stops ROSC too. Because of that slowdown, `stopRosc()` is always applied last, after arming the alarm/GPIOs, while they were still armed on the faster ROSC.
+
+  **Risk**: if clocks aren't moved off an oscillator before it's stopped, the chip hangs and needs a physical reset/reflash (BOOTSEL) to recover. Only tested on Pico 2 (RP2350) with stock boot clock configuration.
+
+- **`isolateUsbPhy()`** — re-isolates the USB PHY (`MAIN_CTRL.PHY_ISO`) before sleeping, matching the exact methodology the RP2350 datasheet itself uses for its own published low-power figures (section 14.9.7.2). Lower risk than `stopXosc`/`stopRosc`: doesn't touch `clk_sys`/`clk_ref`, so no clock-hang risk — any USB activity in flight just disconnects a little earlier than the reboot-on-wake would do anyway.
+
+- **`powerDownWifiChip()`** — **Pico 2 W only**. Powers down the CYW43439 wireless companion chip by driving its regulator-enable line (`WL_REG_ON`, GP23 on this board, confirmed in the official Pico 2 W datasheet) low. This chip is entirely separate from the RP2350 — POWMAN has no control over it — so if it's ever powered on (e.g. by touching `Pin("LED", ...)` or the `network` module), it adds its own baseline current regardless of how far XOSC/ROSC/USB PHY are pushed down. No-op if the chip was never powered up in the first place; not applicable on plain Pico 2.
+
+In testing (Pico 2 W, all of the above combined), sleep current went from ~600µA to ~230-250µA measured on VSYS. The remaining gap versus the RP2350 datasheet's own P1.7 figure (~56µA, measured directly on the chip's 3V3 pin) is most likely the onboard SMPS regulator's own light-load overhead — VSYS is measured upstream of that regulator, so the RP2350's own consumption alone is probably much closer to the datasheet figure.
 
 ---
 
