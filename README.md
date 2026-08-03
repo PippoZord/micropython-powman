@@ -269,11 +269,13 @@ main()
 - Multi-GPIO wake-up (`powmanOffUntilAnyGPIO`)
 - Combined timer + multi-GPIO wake-up (`powmanOffForMsOrGPIO`)
 - Wake-up reason detection (`powmanGetWakeupReason`)
+- Optimize power management by disabling unnecessary components (`lowPowerXosc`/`lowPowerRosc`/`lowPowerUsbPhy`/`lowPowerWifiChip` on `powmanInit`) — ~600µA → ~230-250µA measured on Pico 2 W
 
 ## Future Developments
 
-- Optimize power management by disabling unnecessary components
 - Implement a sleep mode that does not reboot the system and preserves the values of variables like `machine.lightsleep()`
+- Power down the PLLs (`PLL_SYS`/`PLL_USB`) once `lowPowerRosc` moves `clk_sys` off them — they're currently left running unused, the same wasted-oscillator problem `stopXosc`/`stopRosc` already solve for XOSC/ROSC
+- Edge-triggered GPIO wake-up as an alternative to the current level-triggered mode (`PWRUPx.MODE` bit, never set so far)
 ## Safety Notes
 
 * Only use in embedded/bare-metal environments.
