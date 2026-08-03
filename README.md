@@ -137,20 +137,21 @@ Internally reads `CHIP_RESET.HAD_SWCORE_PD` (bit 25) to confirm a POWMAN sleep o
 
 ---
 
-### `powmanInit(absTimeMs: int, lowPowerXosc=False, lowPowerRosc=False, lowPowerUsbPhy=False, lowPowerWifiChip=False)`
+### `powmanInit(absTimeMs: int, lowPowerXosc=False, lowPowerRosc=False, lowPowerPlls=False, lowPowerUsbPhy=False, lowPowerWifiChip=False)`
 
 Initializes the POWMAN timer with an absolute timestamp in milliseconds (must be > 0).
 
-The `lowPower*` flags enable extra, optional current-saving steps on top of the normal SWCORE/XIP/SRAM power-down (`stopXosc`/`stopRosc`/`isolateUsbPhy`/`powerDownWifiChip`, all implemented in `deepsleep.py`). Enabling them here means every subsequent `powmanOff*()` call applies them automatically — no need to build a `beforeSleep` callback yourself. `lowPowerXosc` takes effect immediately; the other three are deferred and applied last, right before the chip halts.
+The `lowPower*` flags enable extra, optional current-saving steps on top of the normal SWCORE/XIP/SRAM power-down (`stopXosc`/`stopRosc`/`powerDownPlls`/`isolateUsbPhy`/`powerDownWifiChip`, all implemented in `deepsleep.py`). Enabling them here means every subsequent `powmanOff*()` call applies them automatically — no need to build a `beforeSleep` callback yourself. `lowPowerXosc` takes effect immediately; the other four are deferred and applied last, right before the chip halts.
 
 | Flag | Effect |
 |---|---|
 | `lowPowerXosc` | Stops the external crystal oscillator. |
 | `lowPowerRosc` | Stops the ring oscillator too (implies clocks drop to POWMAN's 32.768 kHz LPOSC for whatever code runs after this point — arm everything before enabling this). |
+| `lowPowerPlls` | Powers down `PLL_SYS`/`PLL_USB`. Requires `lowPowerXosc` (clk_sys must already be off the PLL path). |
 | `lowPowerUsbPhy` | Re-isolates the USB PHY (matches the RP2350 datasheet's own low-power test methodology). |
 | `lowPowerWifiChip` | **Pico 2 W only.** Powers down the CYW43439 wireless companion chip. No-op on plain Pico 2, or if the chip was never powered up. |
 
-**Risk**: `lowPowerRosc` carries real risk — if clocks aren't moved off an oscillator before it's stopped, the chip hangs and needs a physical reset/reflash (BOOTSEL) to recover. Only tested on Pico 2 (RP2350) with stock boot clock configuration. The other three flags are low risk (no clock changes).
+**Risk**: `lowPowerRosc` and `lowPowerPlls` carry real risk — if clocks aren't moved off an oscillator/PLL before it's stopped, the chip hangs and needs a physical reset/reflash (BOOTSEL) to recover. Only tested on Pico 2 (RP2350) with stock boot clock configuration. `lowPowerUsbPhy`/`lowPowerWifiChip` are low risk (no clock changes).
 
 For maximum power savings:
 
@@ -158,12 +159,12 @@ For maximum power savings:
 import deepsleep
 
 deepsleep.powmanInit(1704067200, lowPowerXosc=True, lowPowerRosc=True,
-                      lowPowerUsbPhy=True, lowPowerWifiChip=True)
+                      lowPowerPlls=True, lowPowerUsbPhy=True, lowPowerWifiChip=True)
 
 deepsleep.powmanOffForMsOrGPIO(10000, [(8, True)])
 ```
 
-In testing (Pico 2 W, all four flags enabled), sleep current went from ~600µA to ~230-250µA measured on VSYS.
+In testing (Pico 2 W, `lowPowerXosc`/`lowPowerRosc`/`lowPowerUsbPhy`/`lowPowerWifiChip` enabled), sleep current went from ~600µA to ~230-250µA measured on VSYS. `lowPowerPlls` has not been measured yet.
 
 ---
 
@@ -269,12 +270,11 @@ main()
 - Multi-GPIO wake-up (`powmanOffUntilAnyGPIO`)
 - Combined timer + multi-GPIO wake-up (`powmanOffForMsOrGPIO`)
 - Wake-up reason detection (`powmanGetWakeupReason`)
-- Optimize power management by disabling unnecessary components (`lowPowerXosc`/`lowPowerRosc`/`lowPowerUsbPhy`/`lowPowerWifiChip` on `powmanInit`) — ~600µA → ~230-250µA measured on Pico 2 W
+- Optimize power management by disabling unnecessary components (`lowPowerXosc`/`lowPowerRosc`/`lowPowerPlls`/`lowPowerUsbPhy`/`lowPowerWifiChip` on `powmanInit`) — ~600µA → ~230-250µA measured on Pico 2 W (`lowPowerPlls` not yet measured)
 
 ## Future Developments
 
 - Implement a sleep mode that does not reboot the system and preserves the values of variables like `machine.lightsleep()`
-- Power down the PLLs (`PLL_SYS`/`PLL_USB`) once `lowPowerRosc` moves `clk_sys` off them — they're currently left running unused, the same wasted-oscillator problem `stopXosc`/`stopRosc` already solve for XOSC/ROSC
 - Edge-triggered GPIO wake-up as an alternative to the current level-triggered mode (`PWRUPx.MODE` bit, never set so far)
 ## Safety Notes
 

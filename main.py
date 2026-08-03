@@ -36,7 +36,7 @@ def main():
         blink(indicator, 6)   # fresh boot / other
 
     deepsleep.powmanInit(1704067200, lowPowerXosc=True, lowPowerRosc=True,
-                         lowPowerUsbPhy=True, lowPowerWifiChip=True)
+                         lowPowerPlls=True, lowPowerUsbPhy=True, lowPowerWifiChip=True)
 
     deepsleep.powmanOffForMsOrGPIO(10000, [(8, True), (9, True), (10, True), (11, True)])
 

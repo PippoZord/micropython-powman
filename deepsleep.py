@@ -67,17 +67,19 @@ PADS_BANK0_BASE = 0x40038000
 # so callers don't need to build their own beforeSleep callback just to use
 # the built-in optimizations. stopXosc is applied immediately here (safe to
 # do early); the rest are deferred and applied last, right before idle().
-_LOW_POWER = {"rosc": False, "usbPhy": False, "wifiChip": False}
+_LOW_POWER = {"rosc": False, "plls": False, "usbPhy": False, "wifiChip": False}
 
 
 # Initialize POWMAN clock and set absolute time in ms.
 # absTimeMs must be > 0.
-# lowPowerXosc/Rosc/UsbPhy/WifiChip enable the optional extra power-saving
-# steps documented below (stopXosc/stopRosc/isolateUsbPhy/powerDownWifiChip)
-# — enabling them here means powmanOff*() applies them automatically,
-# without needing a manual beforeSleep callback.
+# lowPowerXosc/Rosc/Plls/UsbPhy/WifiChip enable the optional extra
+# power-saving steps documented below (stopXosc/stopRosc/powerDownPlls/
+# isolateUsbPhy/powerDownWifiChip) — enabling them here means powmanOff*()
+# applies them automatically, without needing a manual beforeSleep callback.
+# lowPowerPlls requires lowPowerXosc (or a prior stopXosc() call) — see
+# powerDownPlls() below.
 def powmanInit(absTimeMs:int, lowPowerXosc=False, lowPowerRosc=False,
-               lowPowerUsbPhy=False, lowPowerWifiChip=False):
+               lowPowerPlls=False, lowPowerUsbPhy=False, lowPowerWifiChip=False):
     if absTimeMs < 1 :
         raise Exception("absTimeMs must be greater than 0")
 
@@ -105,6 +107,7 @@ def powmanInit(absTimeMs:int, lowPowerXosc=False, lowPowerRosc=False,
         stopXosc()
 
     _LOW_POWER["rosc"]     = lowPowerRosc
+    _LOW_POWER["plls"]     = lowPowerPlls
     _LOW_POWER["usbPhy"]   = lowPowerUsbPhy
     _LOW_POWER["wifiChip"] = lowPowerWifiChip
 
@@ -133,6 +136,8 @@ def _forceReboot():
 def _applyLowPowerConfig():
     if _LOW_POWER["rosc"]:
         stopRosc()
+    if _LOW_POWER["plls"]:
+        powerDownPlls()
     if _LOW_POWER["usbPhy"]:
         isolateUsbPhy()
     if _LOW_POWER["wifiChip"]:
@@ -349,6 +354,34 @@ def stopRosc():
 
     # Nothing left depends on ROSC now — stop it.
     mem32[ROSC_BASE + ROSC_DORMANT] = OSC_DORMANT_VALUE
+
+
+# =============================================================================
+# PLL power-down (low risk, but must run after clk_sys is off the PLL path)
+#
+# Powers down both PLLs (PLL_SYS, PLL_USB) by writing PLL_PWR back to its own
+# reset value — the same single write the pico-sdk's own pll_deinit() does
+# (PD + DSMPD + POSTDIVPD + VCOPD, all four power-down bits set). Once
+# stopXosc() has switched clk_sys onto clk_ref (bypassing the PLL/aux path),
+# nothing depends on either PLL anymore, and leaving them running just burns
+# current for nothing — same wasted-oscillator problem stopXosc()/stopRosc()
+# solve for XOSC/ROSC.
+#
+# RISK: must be called AFTER stopXosc() (or with lowPowerXosc=True on
+# powmanInit). If clk_sys is still sourced from PLL_SYS when this runs, the
+# system clock disappears and the chip hangs.
+
+PLL_SYS_BASE = const(0x40050000)
+PLL_USB_BASE = const(0x40058000)
+
+PLL_PWR = const(0x04)
+
+PLL_PWR_DOWN_VALUE = const(0x2D)  # PD | DSMPD | POSTDIVPD | VCOPD
+
+
+def powerDownPlls():
+    mem32[PLL_SYS_BASE + PLL_PWR] = PLL_PWR_DOWN_VALUE
+    mem32[PLL_USB_BASE + PLL_PWR] = PLL_PWR_DOWN_VALUE
 
 
 # USB PHY isolation (low risk)
