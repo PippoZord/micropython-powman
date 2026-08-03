@@ -182,6 +182,19 @@ The same transition requirement as `powmanOffUntilGPIO` applies to every pin. Af
 
 ---
 
+### `powmanOffForMsOrGPIO(sleepingMs: int, pins: list[tuple[int, bool]])`
+
+Enters deep sleep and reboots when **either** the timer alarm expires **or** any of up to 4 GPIO pins reaches its target level — whichever happens first. Never returns.
+
+```python
+# wake after 10s, or immediately if GP15 goes HIGH before that
+deepsleep.powmanOffForMsOrGPIO(10000, [(15, True)])
+```
+
+Same transition requirement as `powmanOffUntilGPIO`/`powmanOffUntilAnyGPIO` applies to every pin. After reboot, `powmanGetWakeupReason()` tells you which source actually fired: `WAKEUP_ALARM` for the timer, `WAKEUP_GPIO0`..`WAKEUP_GPIO3` for `pins[0]`..`pins[3]`.
+
+---
+
 ## Debugging tip: no serial output after wake-up
 
 Waking up (from timer or GPIO) triggers a full chip reboot, which also resets the USB stack. Your serial terminal has to reconnect to the newly re-enumerated USB device, and usually doesn't do so fast enough to catch the first `print()` calls in `main()`.
@@ -229,6 +242,7 @@ main()
 - Timer-based deep sleep (`powmanOffForMs`)
 - GPIO wake-up (`powmanOffUntilGPIO`)
 - Multi-GPIO wake-up (`powmanOffUntilAnyGPIO`)
+- Combined timer + multi-GPIO wake-up (`powmanOffForMsOrGPIO`)
 - Wake-up reason detection (`powmanGetWakeupReason`)
 
 ## Future Developments

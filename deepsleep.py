@@ -123,17 +123,14 @@ def _powmanPowerOff():
     
 
 
-# Start dormant mode.
-# create and set alarm which trigger awake after sleepingMs.
+# Arm the alarm timer to fire after sleepingMs.
 # sleepingMs must be > 0
-def powmanOffForMs(sleepingMs:int):
+def _armAlarm(sleepingMs: int):
     if sleepingMs < 1 :
         raise Exception("sleepingMs must be greater than 0")
 
     alarmTime = sleepingMs + _getCurrentTime()
     print("Going to sleep for", sleepingMs, "ms")
-    # Enable interrupt
-    mem32[POWMAN_BASE + INTE] = PASS | 0x02
 
     # Stop timer
     mem32[POWMAN_BASE + TIMER] = PASS | 0x00
@@ -147,8 +144,18 @@ def powmanOffForMs(sleepingMs:int):
     # Start timer + reset alarm bit
     mem32[POWMAN_BASE + TIMER] = PASS | 0x72
 
+
+# Start dormant mode.
+# create and set alarm which trigger awake after sleepingMs.
+# sleepingMs must be > 0
+def powmanOffForMs(sleepingMs:int):
+    # Enable interrupt
+    mem32[POWMAN_BASE + INTE] = PASS | 0x02
+
+    _armAlarm(sleepingMs)
+
     _powmanPowerOff()
-    
+
 
 def powmanGetWakeupReason() -> int:
     # HAD_SWCORE_PD (bit 25) is set only when POWMAN explicitly powered down SWCORE
@@ -196,6 +203,25 @@ def powmanOffUntilAnyGPIO(pins):
         raise Exception("pins must contain between 1 and 4 (gpio, high) tuples")
 
     mem32[POWMAN_BASE + INTE] = 0x02
+
+    for slot, (gpio, high) in zip(_PWRUP_REGS, pins):
+        _armGpioWakeup(gpio, high, slot)
+
+    _powmanPowerOff()
+
+
+# Force deep sleep until EITHER the timer alarm expires OR any of up to 4 GPIOs
+# reaches its target level — whichever happens first wakes the chip.
+# sleepingMs must be > 0. pins: list/tuple of up to 4 (gpio, high) tuples.
+# Use powmanGetWakeupReason() after reboot to tell which one fired
+# (WAKEUP_ALARM for the timer, WAKEUP_GPIO0..WAKEUP_GPIO3 for pins[0]..pins[3]).
+def powmanOffForMsOrGPIO(sleepingMs: int, pins):
+    if not 1 <= len(pins) <= 4:
+        raise Exception("pins must contain between 1 and 4 (gpio, high) tuples")
+
+    mem32[POWMAN_BASE + INTE] = PASS | 0x02
+
+    _armAlarm(sleepingMs)
 
     for slot, (gpio, high) in zip(_PWRUP_REGS, pins):
         _armGpioWakeup(gpio, high, slot)
